@@ -39,17 +39,21 @@ what sort order was used:
 import abc
 import logging
 from collections import namedtuple
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 
 from twisted.internet import defer
 
+from synapse.events import EventBase
 from synapse.logging.context import make_deferred_yieldable, run_in_background
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import DatabasePool, make_in_list_sql_clause
 from synapse.storage.databases.main.events_worker import EventsWorkerStore
 from synapse.storage.engines import PostgresEngine
-from synapse.types import RoomStreamToken
+from synapse.types import EventStreamToken, RoomStreamToken
 from synapse.util.caches.stream_change_cache import StreamChangeCache
+
+if TYPE_CHECKING:
+    from synapse.api.filtering import Filter
 
 logger = logging.getLogger(__name__)
 
@@ -291,10 +295,14 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
     def get_room_min_stream_ordering(self):
         raise NotImplementedError()
 
-    @defer.inlineCallbacks
-    def get_room_events_stream_for_rooms(
-        self, room_ids, from_key, to_key, limit=0, order="DESC"
-    ):
+    async def get_room_events_stream_for_rooms(
+        self,
+        room_ids: List[str],
+        from_key: EventStreamToken,
+        to_key: EventStreamToken,
+        limit: int = 0,
+        order: str = "DESC",
+    ) -> Dict[str, Tuple[List[EventBase], EventStreamToken]]:
         """Get new room events in stream ordering since `from_key`.
 
         Args:
@@ -314,11 +322,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
                     - list of recent events in the room
                     - stream ordering key for the start of the chunk of events returned.
         """
-        from_id = RoomStreamToken.parse_stream_token(from_key).stream
+        from_id = RoomStreamToken.parse_stream_token(from_key.token).stream
 
-        room_ids = yield self._events_stream_cache.get_entities_changed(
-            room_ids, from_id
-        )
+        room_ids = self._events_stream_cache.get_entities_changed(room_ids, from_id)
 
         if not room_ids:
             return {}
@@ -326,7 +332,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         results = {}
         room_ids = list(room_ids)
         for rm_ids in (room_ids[i : i + 20] for i in range(0, len(room_ids), 20)):
-            res = yield make_deferred_yieldable(
+            res = await make_deferred_yieldable(
                 defer.gatherResults(
                     [
                         run_in_background(
@@ -346,25 +352,31 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         return results
 
-    def get_rooms_that_changed(self, room_ids, from_key):
+    def get_rooms_that_changed(
+        self, room_ids: Iterable[str], from_key: EventStreamToken,
+    ):
         """Given a list of rooms and a token, return rooms where there may have
         been changes.
 
         Args:
-            room_ids (list)
-            from_key (str): The room_key portion of a StreamToken
+            room_ids
+            from_key: The room_key portion of a StreamToken
         """
-        from_key = RoomStreamToken.parse_stream_token(from_key).stream
+        from_key = RoomStreamToken.parse_stream_token(from_key.token).stream
         return {
             room_id
             for room_id in room_ids
             if self._events_stream_cache.has_entity_changed(room_id, from_key)
         }
 
-    @defer.inlineCallbacks
-    def get_room_events_stream_for_room(
-        self, room_id, from_key, to_key, limit=0, order="DESC"
-    ):
+    async def get_room_events_stream_for_room(
+        self,
+        room_id: str,
+        from_key: EventStreamToken,
+        to_key: EventStreamToken,
+        limit: int = 0,
+        order: str = "DESC",
+    ) -> Tuple[List[EventBase], EventStreamToken]:
 
         """Get new room events in stream ordering since `from_key`.
 
@@ -387,12 +399,10 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         if from_key == to_key:
             return [], from_key
 
-        from_id = RoomStreamToken.parse_stream_token(from_key).stream
-        to_id = RoomStreamToken.parse_stream_token(to_key).stream
+        from_id = RoomStreamToken.parse_stream_token(from_key.token).stream
+        to_id = RoomStreamToken.parse_stream_token(to_key.token).stream
 
-        has_changed = yield self._events_stream_cache.has_entity_changed(
-            room_id, from_id
-        )
+        has_changed = self._events_stream_cache.has_entity_changed(room_id, from_id)
 
         if not has_changed:
             return [], from_key
@@ -410,9 +420,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             rows = [_EventDictReturn(row[0], None, row[1]) for row in txn]
             return rows
 
-        rows = yield self.db_pool.runInteraction("get_room_events_stream_for_room", f)
+        rows = await self.db_pool.runInteraction("get_room_events_stream_for_room", f)
 
-        ret = yield self.get_events_as_list(
+        ret = await self.get_events_as_list(
             [r.event_id for r in rows], get_prev_content=True
         )
 
@@ -422,7 +432,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             ret.reverse()
 
         if rows:
-            key = "s%d" % min(r.stream_ordering for r in rows)
+            key = EventStreamToken("s%d" % min(r.stream_ordering for r in rows))
         else:
             # Assume we didn't get anything because there was nothing to
             # get.
@@ -430,10 +440,11 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         return ret, key
 
-    @defer.inlineCallbacks
-    def get_membership_changes_for_user(self, user_id, from_key, to_key):
-        from_id = RoomStreamToken.parse_stream_token(from_key).stream
-        to_id = RoomStreamToken.parse_stream_token(to_key).stream
+    async def get_membership_changes_for_user(
+        self, user_id: str, from_key: EventStreamToken, to_key: EventStreamToken
+    ) -> List[EventBase]:
+        from_id = RoomStreamToken.parse_stream_token(from_key.token).stream
+        to_id = RoomStreamToken.parse_stream_token(to_key.token).stream
 
         if from_key == to_key:
             return []
@@ -460,9 +471,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
             return rows
 
-        rows = yield self.db_pool.runInteraction("get_membership_changes_for_user", f)
+        rows = await self.db_pool.runInteraction("get_membership_changes_for_user", f)
 
-        ret = yield self.get_events_as_list(
+        ret = await self.get_events_as_list(
             [r.event_id for r in rows], get_prev_content=True
         )
 
@@ -470,8 +481,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         return ret
 
-    @defer.inlineCallbacks
-    def get_recent_events_for_room(self, room_id, limit, end_token):
+    async def get_recent_events_for_room(
+        self, room_id: str, limit: int, end_token: EventStreamToken
+    ) -> Tuple[List[EventBase], EventStreamToken]:
         """Get the most recent events in the room in topological ordering.
 
         Args:
@@ -486,11 +498,11 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             The events returned are in ascending order.
         """
 
-        rows, token = yield self.get_recent_event_ids_for_room(
+        rows, token = await self.get_recent_event_ids_for_room(
             room_id, limit, end_token
         )
 
-        events = yield self.get_events_as_list(
+        events = await self.get_events_as_list(
             [r.event_id for r in rows], get_prev_content=True
         )
 
@@ -498,8 +510,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         return (events, token)
 
-    @defer.inlineCallbacks
-    def get_recent_event_ids_for_room(self, room_id, limit, end_token):
+    async def get_recent_event_ids_for_room(
+        self, room_id: str, limit: int, end_token: EventStreamToken
+    ) -> Tuple[List[_EventDictReturn], EventStreamToken]:
         """Get the most recent events in the room in topological ordering.
 
         Args:
@@ -517,13 +530,11 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         if limit == 0:
             return [], end_token
 
-        end_token = RoomStreamToken.parse(end_token)
-
-        rows, token = yield self.db_pool.runInteraction(
+        rows, token = await self.db_pool.runInteraction(
             "get_recent_event_ids_for_room",
             self._paginate_room_events_txn,
             room_id,
-            from_token=end_token,
+            from_token=RoomStreamToken.parse(end_token.token),
             limit=limit,
         )
 
@@ -558,7 +569,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         return self.db_pool.runInteraction("get_room_event_before_stream_ordering", _f)
 
-    async def get_room_events_max_id(self, room_id: Optional[str] = None) -> str:
+    def get_room_events_max_id(self) -> EventStreamToken:
         """Returns the current token for rooms stream.
 
         By default, it returns the current global stream token. Specifying a
@@ -566,13 +577,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         token.
         """
         token = self.get_room_max_stream_ordering()
-        if room_id is None:
-            return "s%d" % (token,)
-        else:
-            topo = await self.db_pool.runInteraction(
-                "_get_max_topological_txn", self._get_max_topological_txn, room_id
-            )
-            return "t%d-%d" % (topo, token)
+        return EventStreamToken("s%d" % (token,))
 
     def get_stream_token_for_event(self, event_id):
         """The stream token for an event
@@ -585,7 +590,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         """
         return self.db_pool.simple_select_one_onecol(
             table="events", keyvalues={"event_id": event_id}, retcol="stream_ordering"
-        ).addCallback(lambda row: "s%d" % (row,))
+        ).addCallback(lambda row: EventStreamToken("s%d" % (row,)))
 
     def get_topological_token_for_event(self, event_id):
         """The stream token for an event
@@ -898,13 +903,13 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
     def _paginate_room_events_txn(
         self,
         txn,
-        room_id,
-        from_token,
-        to_token=None,
-        direction="b",
-        limit=-1,
-        event_filter=None,
-    ):
+        room_id: str,
+        from_token: EventStreamToken,
+        to_token: Optional[EventStreamToken] = None,
+        direction: str = "b",
+        limit: int = -1,
+        event_filter: Optional["Filter"] = None,
+    ) -> Tuple[List[_EventDictReturn], EventStreamToken]:
         """Returns list of events before or after a given token.
 
         Args:
@@ -1006,7 +1011,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             # TODO (erikj): We should work out what to do here instead.
             next_token = to_token if to_token else from_token
 
-        return rows, str(next_token)
+        return rows, EventStreamToken(str(next_token))
 
     @defer.inlineCallbacks
     def paginate_room_events(
