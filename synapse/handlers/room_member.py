@@ -31,7 +31,15 @@ from synapse.events.builder import create_local_event_from_event_dict
 from synapse.events.snapshot import EventContext
 from synapse.events.validator import EventValidator
 from synapse.storage.roommember import RoomsForUser
-from synapse.types import Collection, JsonDict, Requester, RoomAlias, RoomID, UserID
+from synapse.types import (
+    Collection,
+    EventStreamToken,
+    JsonDict,
+    Requester,
+    RoomAlias,
+    RoomID,
+    UserID,
+)
 from synapse.util.async_helpers import Linearizer
 from synapse.util.distributor import user_joined_room, user_left_room
 
@@ -125,7 +133,7 @@ class RoomMemberHandler(object):
         txn_id: Optional[str],
         requester: Requester,
         content: JsonDict,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, EventStreamToken]:
         """
         Rejects an out-of-band invite we have received from a remote server
 
@@ -137,7 +145,7 @@ class RoomMemberHandler(object):
                Normally an empty dict.
 
         Returns:
-            event id, stream_id of the leave event
+            event id, stream token of the leave event
         """
         raise NotImplementedError()
 
@@ -174,7 +182,7 @@ class RoomMemberHandler(object):
         ratelimit: bool = True,
         content: Optional[dict] = None,
         require_consent: bool = True,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, EventStreamToken]:
         user_id = target.to_string()
 
         if content is None:
@@ -208,9 +216,9 @@ class RoomMemberHandler(object):
         if duplicate is not None:
             # Discard the new event since this membership change is a no-op.
             _, stream_id = await self.store.get_event_ordering(duplicate.event_id)
-            return duplicate.event_id, stream_id
+            return duplicate.event_id, EventStreamToken(stream_id)
 
-        stream_id = await self.event_creation_handler.handle_new_client_event(
+        stream_token = await self.event_creation_handler.handle_new_client_event(
             requester, event, context, extra_users=[target], ratelimit=ratelimit,
         )
 
@@ -234,7 +242,7 @@ class RoomMemberHandler(object):
                 if prev_member_event.membership == Membership.JOIN:
                     await self._user_left_room(target, room_id)
 
-        return event.event_id, stream_id
+        return event.event_id, stream_token
 
     async def copy_room_tags_and_direct_to_room(
         self, old_room_id, new_room_id, user_id
@@ -284,7 +292,7 @@ class RoomMemberHandler(object):
         ratelimit: bool = True,
         content: Optional[dict] = None,
         require_consent: bool = True,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, EventStreamToken]:
         key = (room_id,)
 
         with (await self.member_linearizer.queue(key)):
@@ -315,7 +323,7 @@ class RoomMemberHandler(object):
         ratelimit: bool = True,
         content: Optional[dict] = None,
         require_consent: bool = True,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, EventStreamToken]:
         content_specified = bool(content)
         if content is None:
             content = {}
@@ -424,7 +432,7 @@ class RoomMemberHandler(object):
                     )
                     return (
                         old_state.event_id,
-                        stream_id,
+                        EventStreamToken(stream_id),
                     )
 
             if old_membership in ["ban", "leave"] and action == "kick":
@@ -1060,7 +1068,7 @@ class RoomMemberMasterHandler(RoomMemberHandler):
         txn_id: Optional[str],
         requester: Requester,
         content: JsonDict,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, EventStreamToken]:
         """
         Rejects an out-of-band invite received from a remote user
 
@@ -1074,10 +1082,10 @@ class RoomMemberMasterHandler(RoomMemberHandler):
         fed_handler = self.federation_handler
         try:
             inviter_id = UserID.from_string(invite_event.sender)
-            event, stream_id = await fed_handler.do_remotely_reject_invite(
+            event, stream_token = await fed_handler.do_remotely_reject_invite(
                 [inviter_id.domain], room_id, target_user, content=content
             )
-            return event.event_id, stream_id
+            return event.event_id, stream_token
         except Exception as e:
             # if we were unable to reject the invite, we will generate our own
             # leave event.
