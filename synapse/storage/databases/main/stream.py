@@ -1064,8 +1064,8 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
 
 class StreamStore(StreamWorkerStore):
-    def get_room_max_stream_ordering(self):
+    def get_room_max_stream_ordering(self) -> int:
         return self._stream_id_gen.get_current_token()
 
-    def get_room_min_stream_ordering(self):
+    def get_room_min_stream_ordering(self) -> int:
         return self._backfill_id_gen.get_current_token()
