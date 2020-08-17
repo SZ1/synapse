@@ -409,7 +409,7 @@ class EmailConfig(Config):
           # * The contents of password reset emails sent by the homeserver:
           #   'password_reset.html' and 'password_reset.txt'
           #
-          # * An HTML page that a user will see when they follow the link the password
+          # * An HTML page that a user will see when they follow the link in the password
           #   reset email. The user will be asked to confirm the action before their
           #   password is reset: 'password_reset_confirmation.html'
           #
