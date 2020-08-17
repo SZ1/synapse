@@ -84,8 +84,7 @@ New HTML templates
 A new HTML template,
 `password_reset_confirmation.html <https://github.com/matrix-org/synapse/blob/develop/synapse/res/templates/password_reset_confirmation.html>`_,
 has been added to the ``synapse/res/templates`` directory. If you are using a
-custom template directory, you will need to copy the template over and modify
-it if necessary.
+custom template directory, you may want to copy the template over and modify it.
 
 This page will appear to the user after clicking a password reset link that has
 been emailed to them.
